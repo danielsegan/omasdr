@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OmaSDR setup: install what the daemon needs and verify the dongle.
+# OmaSDR setup: install what the daemon needs and verify the radio.
 # Idempotent. Run it from a terminal; it uses sudo where it must.
 #
 #   bash scripts/setup.sh          install missing packages, then verify
@@ -83,15 +83,21 @@ if [[ -z ${XDG_SESSION_TYPE:-} || ${XDG_SESSION_TYPE:-} == tty ]] && ! id -nG | 
 fi
 
 step "Device"
+RTL_PRESENT=0
+SDRPLAY_PRESENT=0
 if command -v lsusb >/dev/null 2>&1 && lsusb | grep -qi '0bda:283[28]'; then
   ok "$(lsusb | grep -i '0bda:283[28]' | head -1 | sed 's/^Bus [0-9]* Device [0-9]*: //')"
-  DEVICE_PRESENT=1
-else
-  bad "no RTL-SDR on USB (0bda:2838). Plug it straight into the machine: some USB-C hubs do not pass it through and give no error at all."
-  DEVICE_PRESENT=0
+  RTL_PRESENT=1
+fi
+if command -v lsusb >/dev/null 2>&1 && lsusb | grep -qi '1df7:'; then
+  ok "$(lsusb | grep -i '1df7:' | head -1 | sed 's/^Bus [0-9]* Device [0-9]*: //')"
+  SDRPLAY_PRESENT=1
+fi
+if (( ! RTL_PRESENT && ! SDRPLAY_PRESENT )); then
+  bad "no supported radio on USB (RTL-SDR 0bda:2838/2832, or SDRplay 1df7). Plug it straight into the machine: some USB-C hubs do not pass it through and give no error at all."
 fi
 
-if (( DEVICE_PRESENT )); then
+if (( RTL_PRESENT )); then
   step "Driver claim (rtl_test -t)"
   usb_node=$(lsusb | grep -i '0bda:283[28]' | head -1 | sed -E 's|Bus ([0-9]+) Device ([0-9]+):.*|/dev/bus/usb/\1/\2|')
   holder=$(fuser "$usb_node" 2>/dev/null | tr -s ' ' | sed 's/^ //')
@@ -109,6 +115,60 @@ if (( DEVICE_PRESENT )); then
       sed 's/^/      /' <<<"$out" | tail -5
     fi
   fi
+fi
+
+# SDRplay needs the proprietary API and the SoapySDRPlay module, both AUR.
+# The script never installs AUR packages (omarchy pkg add / pacman only).
+# Missing extras are a note when no RSP is plugged in, and a failure when one is.
+step "SDRplay (SoapySDR, optional)"
+if pacman -Q soapysdr >/dev/null 2>&1; then
+  ok "soapysdr $(pacman -Q soapysdr | awk '{print $2}')"
+else
+  note "soapysdr not installed (gnuradio-osmosdr usually pulls it; required to open an SDRplay)"
+fi
+if pacman -Q libsdrplay >/dev/null 2>&1 || pacman -Q sdrplay >/dev/null 2>&1; then
+  api_pkg=$(pacman -Q libsdrplay 2>/dev/null || pacman -Q sdrplay 2>/dev/null)
+  ok "SDRplay API ($api_pkg)"
+elif (( SDRPLAY_PRESENT )); then
+  bad "SDRplay radio present but the API is missing (AUR: libsdrplay). Then: sudo systemctl enable --now sdrplay"
+else
+  note "libsdrplay not installed (AUR; only needed for an SDRplay radio)"
+fi
+if find /usr/lib/SoapySDR /usr/local/lib/SoapySDR -iname '*sdrplay*' 2>/dev/null | grep -q .; then
+  ok "SoapySDRPlay module installed"
+elif (( SDRPLAY_PRESENT )); then
+  bad "SoapySDRPlay module missing (AUR: soapysdrplay3-git). OmaSDR opens the radio as soapy=0,driver=sdrplay"
+else
+  note "soapysdrplay3-git not installed (AUR; only needed for an SDRplay radio)"
+fi
+if [[ -f /usr/lib/systemd/system/sdrplay.service || -f /etc/systemd/system/sdrplay.service ]]; then
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet sdrplay; then
+    ok "sdrplay.service is running"
+  elif (( SDRPLAY_PRESENT )); then
+    bad "sdrplay.service is not running (sudo systemctl enable --now sdrplay)"
+  else
+    note "sdrplay.service is installed but not running"
+  fi
+fi
+if (( SDRPLAY_PRESENT )); then
+  usb_node=$(lsusb | grep -i '1df7:' | head -1 | sed -E 's|Bus ([0-9]+) Device ([0-9]+):.*|/dev/bus/usb/\1/\2|')
+  holder=$(fuser "$usb_node" 2>/dev/null | tr -s ' ' | sed 's/^ //')
+  if [[ -n $holder ]]; then
+    names=$(for pid in $holder; do cat "/proc/$pid/comm" 2>/dev/null; done | sort -u | tr '\n' ' ')
+    note "SDRplay is held by: ${names:-pid $holder}. Close SDRConnect (it must not hold the device) before OmaSDR can open it."
+  fi
+fi
+if /usr/bin/python3 -c 'import SoapySDR' >/dev/null 2>&1; then
+  ok "SoapySDR Python bindings import"
+  if (( SDRPLAY_PRESENT )); then
+    if /usr/bin/python3 - <<'PY' >/dev/null 2>&1
+import SoapySDR
+raise SystemExit(0 if SoapySDR.Device.enumerate(dict(driver="sdrplay")) else 1)
+PY
+    then ok "SoapySDR sees an SDRplay"; else note "SoapySDR did not list an SDRplay (is sdrplay.service running, and is SDRConnect closed?)"; fi
+  fi
+elif (( SDRPLAY_PRESENT )); then
+  note "SoapySDR Python bindings missing; USB listing still works, playback goes through gr-osmosdr"
 fi
 
 step "Python bindings (system /usr/bin/python3)"

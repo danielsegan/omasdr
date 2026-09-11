@@ -13,7 +13,7 @@ asking the maintainer. Add new decisions here as they are made, with the date.
 - The app should not need to be "open". A small bar widget opens a popover
   with the essential controls; an "expand" action opens a larger panel for
   the waterfall and spectrum plot.
-- Shipped so far: device detection, frequency entry with a kHz/MHz toggle,
+- Shipped so far: device detection (RTL-SDR and SDRplay via SoapySDR), frequency entry with a kHz/MHz toggle,
   scroll-to-step tuning, eight demodulators, presets with a repeatable gqrx
   import, recording, a signal meter, a spectrum plot with waterfall, and a
   frequency reference window, and a nearby search for local airband and
@@ -32,7 +32,8 @@ asking the maintainer. Add new decisions here as they are made, with the date.
     popover (with an example for `~/.config/hypr/bindings.lua` in the README)
     and keys inside it for play, stop, step, record, and jumping to a preset,
     listed somewhere discoverable.
-  - Other gr-osmosdr backends, once someone can test one.
+  - Other gr-osmosdr backends after SDRplay (HackRF, Airspy, rtl_tcp, …),
+    once someone can test one.
 
   Design the daemon protocol so these stay additive rather than breaking.
 
@@ -41,8 +42,9 @@ asking the maintainer. Add new decisions here as they are made, with the date.
 **Backend: custom Python daemon on GNU Radio, reusing everything possible.**
 Do not reimplement DSP. Everything below already ships in the system packages:
 
-- Device access via `gr-osmosdr` (`osmosdr.source`). This also gives free
-  support for HackRF, Airspy, SDRplay, and rtl_tcp remotes later.
+- Device access via `gr-osmosdr` (`osmosdr.source`). SDRplay is opened this
+  way through SoapySDR (`soapy=0,driver=sdrplay`). The same block also
+  speaks HackRF, Airspy, and rtl_tcp remotes once detection lists them.
 - Demodulators from `gnuradio.analog`: WFM, WFM stereo, NFM, AM, USB, LSB,
   CW, RAW. These are the "main ones" the UI lists.
 - Squelch, filters, and resamplers from `gnuradio.analog` / `gnuradio.filter`.
@@ -234,11 +236,24 @@ SoapySDR, and rtl_tcp, so broadening support is a detection and picker job,
 not a signal-processing one. Say exactly this in the README rather than
 implying wider support than has been tried.
 
-**Device setup.** MVP detects the single connected device and shows its name,
+**SDRplay via SoapySDR (2026-09-11).** The first extra backend is SDRplay,
+opened natively through gr-osmosdr's Soapy source — not SDRConnect's
+WebSocket. `enumerate_devices` still lists RTL dongles first (empty
+`device` keeps picking the dongle when both are present), then RSPs on USB
+vendor `1df7` / Soapy `driver=sdrplay`. The osmosdr string is
+`soapy=0,driver=sdrplay` plus `,serial=…` when known, the same form gqrx
+documents. Playback is the existing `osmosdr.source(args=...)` path.
+`device.kind` (`rtl` | `sdrplay`) is additive on `state` and `devices`.
+Required extras live in the AUR (`libsdrplay`, `soapysdrplay3-git`) and
+`sdrplay.service`; `setup.sh` checks them but never installs AUR packages.
+The V4 remains the only radio confirmed by ear; an RSP showing up and
+playing still needs a hardware report before the README calls it tested.
+
+**Device setup.** MVP detects the connected radio and shows its name,
 serial, and whether it is free, held by OmaSDR, held by another process
-(gqrx), or missing. Only one process can open an RTL-SDR at a time; the
-popover must say so instead of failing silently. Multi-device selection is
-still ahead.
+(gqrx, SDRConnect), or missing. Only one process can open the radio at a
+time; the popover must say so instead of failing silently. Multi-device
+selection is still ahead.
 
 **Plugin identity.** id `com.omasdr.radio`, display name `OmaSDR`. Kinds
 `bar-widget` and `panel`, mirroring omastorm's manifest.
@@ -268,7 +283,9 @@ bash script that takes a machine from nothing to a verified dongle.
 
 - Required packages: `rtl-sdr`, `gnuradio-osmosdr` (pulls `gnuradio` and
   `python-gnuradio`), `usbutils`. Optional: `gqrx`, only for bookmark
-  import; the script offers it but never requires it.
+  import; the script offers it but never requires it. SDRplay extras
+  (`libsdrplay`, `soapysdrplay3-git`) are AUR-only: the script checks for
+  them when an RSP is plugged in and never installs them.
 - Installs only what `pacman -Q` reports missing, via `omarchy pkg add`.
   Re-running on a complete system installs nothing.
 - Runs in a terminal and uses `sudo` where needed (package install, module
@@ -276,13 +293,16 @@ bash script that takes a machine from nothing to a verified dongle.
 - Steps, in order: check packages and install missing; unload
   `dvb_usb_rtl28xxu` if loaded (the package ships the blacklist but that
   only stops future autoloads); after a fresh install, reload and trigger
-  udev and tell the user to replug; check `lsusb` for `0bda:2838` and print
-  the USB-hub warning from the device notes if absent; run `rtl_test -t`
-  under a timeout, look for the tuner line and the V4 banner, explain that
-  the trailing "No E4000 tuner found" is harmless, and name the process
-  holding the device if it is busy; import `gnuradio` and `osmosdr` under
-  the system Python and print versions; end with a pass/fail table and a
-  non-zero exit on any failure.
+  udev and tell the user to replug; check `lsusb` for an RTL-SDR
+  (`0bda:2838`/`2832`) or an SDRplay (`1df7`) and print the USB-hub warning
+  from the device notes if neither is present; run `rtl_test -t` under a
+  timeout when an RTL-SDR is plugged in, look for the tuner line and the V4
+  banner, explain that the trailing "No E4000 tuner found" is harmless, and
+  name the process holding the device if it is busy; when an SDRplay is
+  plugged in, check the AUR extras (`libsdrplay`, `soapysdrplay3-git`) and
+  `sdrplay.service` without installing them; import `gnuradio` and `osmosdr`
+  under the system Python and print versions; end with a pass/fail table and
+  a non-zero exit on any failure.
 - `--check` does everything except install and unload. The daemon runs
   `setup.sh --check` when it fails to start for a dependency reason and the
   popover shows the result with a "run setup" hint.
@@ -507,8 +527,10 @@ has just plugged in a dongle, not for a contributor. Keep it in this shape:
 - What it is, in two sentences, and honestly positioned against gqrx.
 - **Hardware**, split three ways and never blurred: tested (the V4 alone),
   should work unchanged (RTL2832U dongles on the two matched USB ids), and
-  not found yet (other ids, and every non-RTL radio). See the hardware-scope
-  decision above.
+  not found yet (other ids, and remaining non-RTL radios). SDRplay via
+  SoapySDR is its own paragraph, not folded into "should work unchanged":
+  it is a different backend with AUR extras, and it is not yet heard on
+  the maintainer's machine. See the hardware-scope decisions above.
 - Install: the two commands, what the setup script does, the package table,
   and a warning that `dpdk` makes the first download about 280 MiB.
 - Using it: a one-line first success (tune an FM station), then frequency,
@@ -596,6 +618,10 @@ Open checks:
       forced visible, but `hyprctl dispatch movecursor` is a no-op on the
       maintainer's machine, so a synthetic hover could never be driven to see
       it appear on its own. Hover it once by hand.
+- [ ] **SDRplay via SoapySDR, on real hardware.** Discovery and the play path
+      are in (`soapy=0,driver=sdrplay`, USB `1df7`, AUR extras checked by
+      setup). Confirm an RSP lists, opens without SDRConnect, and produces
+      audio before the README calls it tested.
 
 ## Distribution
 

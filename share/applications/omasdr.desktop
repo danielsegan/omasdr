@@ -2,11 +2,11 @@
 Type=Application
 Name=OmaSDR
 GenericName=Software-Defined Radio
-Comment=Tune your RTL-SDR: frequency, demod, presets
+Comment=Tune your SDR: frequency, demod, presets
 # Summons the panel-kind window through the running shell, the same IPC the
 # bar widget's EXPAND button sends. There is no standalone binary to exec.
 Exec=omarchy shell shell toggle com.omasdr.radio {}
 Icon=omasdr
 Terminal=false
 Categories=AudioVideo;Audio;HamRadio;
-Keywords=sdr;radio;rtl-sdr;rtlsdr;fm;shortwave;scanner;
+Keywords=sdr;radio;rtl-sdr;rtlsdr;sdrplay;fm;shortwave;scanner;

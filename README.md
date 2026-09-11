@@ -81,16 +81,25 @@ and most generic R820T2 dongles. Only the tuner differs; everything above it
 is the same code path. If you try one, please open an issue and say how it
 went.
 
+**SDRplay (SoapySDR):** RSP1, RSP1A, RSP2, RSPduo, RSPdx, RSP1B, and
+RSPdx-R2 are discovered on USB vendor `1df7` and opened through
+gr-osmosdr's Soapy backend (`soapy=0,driver=sdrplay`). This is native USB
+access, not SDRConnect's WebSocket. Close SDRConnect first — it holds the
+device. You need two AUR packages the setup script will not install for
+you: `libsdrplay` (the proprietary API; enable `sdrplay.service`) and
+`soapysdrplay3-git` (the Soapy module). Detection and the play path are
+in; they have not yet been confirmed on the maintainer's hardware. If you
+try an RSP, please open an issue and say how it went.
+
 **Not found yet:** rebadged RTL dongles that report some other USB id, and
-every non-RTL radio. The signal-processing layer underneath is
+every remaining non-RTL radio. The signal-processing layer underneath is
 [gr-osmosdr](https://osmocom.org/projects/gr-osmosdr/wiki), which already
-speaks HackRF, Airspy, bladeRF, USRP, SDRplay through SoapySDR, and
-`rtl_tcp`. Only the device detection is RTL-only. Broadening it is on the
-roadmap; see [AGENTS.md](AGENTS.md).
+speaks HackRF, Airspy, bladeRF, USRP, and `rtl_tcp`. Those still need
+detection work; see [AGENTS.md](AGENTS.md).
 
 ## Install
 
-You need Omarchy with its Quickshell shell, and one of the dongles above.
+You need Omarchy with its Quickshell shell, and an RTL-SDR or SDRplay radio.
 
 ```sh
 omarchy plugin add https://github.com/brytorres/omasdr --enable
@@ -101,8 +110,9 @@ The installer asks which bar section the antenna should sit in. Move it
 later with `omarchy bar move com.omasdr.radio --section left`.
 
 The setup script does the rest: installs missing packages, unbinds the
-kernel's TV driver if it grabbed your dongle, checks udev, finds the device,
-runs `rtl_test`, confirms the Python bindings, and adds OmaSDR to your app
+kernel's TV driver if it grabbed an RTL-SDR, checks udev, finds the radio,
+runs `rtl_test` on an RTL-SDR, checks SoapySDRPlay extras if an SDRplay is
+plugged in, confirms the Python bindings, and adds OmaSDR to your app
 selector with an icon that follows your theme. Run it again whenever you want; it only installs what is missing,
 and `--check` verifies without changing anything.
 
@@ -111,9 +121,22 @@ It installs these, all from the Arch `extra` repository:
 | Package | Why |
 |---|---|
 | `rtl-sdr` | driver, udev rules, `rtl_test` |
-| `gnuradio-osmosdr` | opens the dongle; pulls in `gnuradio` and `python-gnuradio` |
-| `usbutils` | `lsusb`, to find the dongle |
-| `psmisc` | `fuser`, to tell you which program is holding the dongle |
+| `gnuradio-osmosdr` | opens the radio; pulls in `gnuradio`, `python-gnuradio`, and `soapysdr` |
+| `usbutils` | `lsusb`, to find the radio |
+| `psmisc` | `fuser`, to tell you which program is holding the radio |
+
+An SDRplay radio needs two more packages from the AUR, which the script
+checks for but does not install:
+
+| Package | Why |
+|---|---|
+| `libsdrplay` | proprietary API 3.x and `sdrplay.service` |
+| `soapysdrplay3-git` | SoapySDR module; play uses `soapy=0,driver=sdrplay` |
+
+```sh
+# after the AUR packages are in place
+sudo systemctl enable --now sdrplay
+```
 
 Expect a big first download. `gnuradio` depends on `libuhd`, which pulls in
 `dpdk` at around 280 MiB. Nothing has gone wrong.
@@ -214,18 +237,20 @@ bookmarks file:
 omarchy pkg add gqrx
 ```
 
-**One program at a time.** An RTL-SDR can only be opened by one process. If
-gqrx (or `rtl_tcp`, or `rtl_433`) is holding your dongle, OmaSDR says so by
-name and refuses to play. Close the other program and press play again. It
-works the other way too, so stop OmaSDR before starting gqrx.
+**One program at a time.** An RTL-SDR or an SDRplay can only be opened by
+one process. If gqrx (or `rtl_tcp`, or `rtl_433`, or SDRConnect) is holding
+your radio, OmaSDR says so by name and refuses to play. Close the other
+program and press play again. It works the other way too, so stop OmaSDR
+before starting gqrx or SDRConnect.
 
 ## Troubleshooting
 
-**"No device."** Plug the dongle straight into the machine. Some USB-C hubs
+**"No device."** Plug the radio straight into the machine. Some USB-C hubs
 silently fail to pass it through, with nothing in `lsusb` and nothing in
-`dmesg`. Try a different port before anything else.
+`dmesg`. Try a different port before anything else. An SDRplay also needs
+`sdrplay.service` running and SDRConnect closed.
 
-**"Held by ..."** Another program has the dongle. The message names it.
+**"Held by ..."** Another program has the radio. The message names it.
 
 **I updated and nothing changed.** Run `omarchy restart shell`. The shell
 caches plugin components, so the bar widget and the windows keep running the

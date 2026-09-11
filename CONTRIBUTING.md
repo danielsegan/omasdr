@@ -27,8 +27,8 @@ scripts/run.sh         open the window without the shell
 
 ## Prerequisites
 
-Omarchy with its Quickshell shell, an RTL-SDR dongle, and the packages the
-setup script installs:
+Omarchy with its Quickshell shell, an RTL-SDR or SDRplay radio, and the
+packages the setup script installs (plus the AUR extras for an SDRplay):
 
 ```sh
 bash scripts/setup.sh
