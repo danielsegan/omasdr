@@ -6,9 +6,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        OmaSDR has only been tested on one dongle, the RTL-SDR Blog V4. Every
-        report here is how that list grows, so a report that it *worked* is as
-        useful as one that it did not.
+        OmaSDR has only been tested on one dongle, the RTL-SDR Blog V4.
+        SDRplay radios are listed and opened through SoapySDR but have not
+        yet been confirmed on the maintainer's hardware. Every report here
+        is how that list grows, so a report that it *worked* is as useful
+        as one that it did not.
 
         See [Hardware](https://github.com/brytorres/omasdr#hardware) for what
         is currently expected to work.
@@ -39,9 +41,8 @@ body:
     attributes:
       label: USB id
       description: >
-        From `lsusb`, the pair after `ID`. OmaSDR currently matches only
-        `0bda:2838` and `0bda:2832`, so this is the field that decides whether
-        detection can find it.
+        From `lsusb`, the pair after `ID`. RTL-SDR matches `0bda:2838` and
+        `0bda:2832`; SDRplay matches vendor `1df7`.
       placeholder: "0bda:2838"
     validations:
       required: true

@@ -124,43 +124,219 @@ def log(*parts):
 
 # --------------------------------------------------------------------- devices
 
+# RTL2832U dongles this has been tested against (AGENTS.md hardware scope).
+RTL_USB_IDS = {("0bda", "2838"), ("0bda", "2832")}
+
+# SDRplay RSPs, vendor 1df7. Product ids from the API 3.x udev rules / hwdb.
+# Unknown 1df7 products are still listed: a new RSP should appear even before
+# this table knows its name.
+SDRPLAY_VENDOR = "1df7"
+SDRPLAY_NAMES = {
+    "2500": "SDRplay RSP1",
+    "3000": "SDRplay RSP1A",
+    "3010": "SDRplay RSP2",
+    "3020": "SDRplay RSPduo",
+    "3030": "SDRplay RSPdx",
+    "3040": "SDRplay RSP1B",
+    "3050": "SDRplay RSP1B",
+    "3060": "SDRplay RSPdx-R2",
+}
+
+_LSUSB_LINE = re.compile(
+    r"Bus (\d+) Device (\d+): ID ([0-9a-fA-F]{4}):([0-9a-fA-F]{4})(?: (.*))?$")
+
+
 @dataclass
 class DeviceInfo:
     index: int
     name: str
     serial: str
-    args: str            # osmosdr device string, e.g. "rtl=0"
+    args: str            # osmosdr device string, e.g. "rtl=0" or "soapy=0,driver=sdrplay"
     usb_path: str = ""   # /dev/bus/usb/BBB/DDD
     status: str = "free"  # free | ours | busy | missing
     held_by: str = ""     # process name when busy
+    kind: str = "rtl"    # rtl | sdrplay; additive, older clients ignore it
 
 
-def enumerate_devices() -> list[DeviceInfo]:
-    """RTL-SDR dongles by USB id. Other backends arrive with multi-device work."""
-    devices: list[DeviceInfo] = []
-    lsusb = shutil.which("lsusb")
-    if not lsusb:
-        return devices
-    try:
-        out = subprocess.run([lsusb], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return devices
-    index = 0
-    for line in out.splitlines():
-        m = re.match(r"Bus (\d+) Device (\d+): ID ([0-9a-f]{4}):([0-9a-f]{4}) (.*)", line)
+@dataclass(frozen=True)
+class UsbRow:
+    bus: str
+    dev: str
+    vid: str
+    pid: str
+    desc: str
+
+    @property
+    def usb_path(self) -> str:
+        return f"/dev/bus/usb/{self.bus}/{self.dev}"
+
+
+def parse_lsusb(text: str) -> list[UsbRow]:
+    rows: list[UsbRow] = []
+    for line in text.splitlines():
+        m = _LSUSB_LINE.match(line)
         if not m:
             continue
         bus, dev, vid, pid, desc = m.groups()
-        if (vid, pid) not in {("0bda", "2838"), ("0bda", "2832")}:
+        rows.append(UsbRow(bus, dev, vid.lower(), pid.lower(), (desc or "").strip()))
+    return rows
+
+
+def read_lsusb() -> str:
+    lsusb = shutil.which("lsusb")
+    if not lsusb:
+        return ""
+    try:
+        return subprocess.run([lsusb], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def sdrplay_osmosdr_args(serial: str = "", soapy_index: int = 0) -> str:
+    """gr-osmosdr Soapy backend. Same string gqrx documents for SDRplay."""
+    parts = [f"soapy={soapy_index}", "driver=sdrplay"]
+    if serial:
+        parts.append("serial=" + serial)
+    return ",".join(parts)
+
+
+def soapy_sdrplay_kwargs() -> list[dict]:
+    """SoapySDR enumerate, driver=sdrplay. Empty when the module is absent."""
+    try:
+        import SoapySDR
+    except ImportError:
+        return []
+    try:
+        found = SoapySDR.Device.enumerate(dict(driver="sdrplay"))
+    except Exception:                                   # noqa: BLE001
+        return []
+    out: list[dict] = []
+    for kw in found:
+        try:
+            out.append({str(k): str(v) for k, v in dict(kw).items()})
+        except (TypeError, ValueError):
             continue
-        info = DeviceInfo(index=index, name=desc.strip(), serial="", args=f"rtl={index}",
-                          usb_path=f"/dev/bus/usb/{bus}/{dev}")
-        info.serial, product = usb_strings(bus, dev)
+    return out
+
+
+def _sdrplay_usb_rows(rows: list[UsbRow]) -> list[UsbRow]:
+    return [r for r in rows if r.vid == SDRPLAY_VENDOR]
+
+
+def _usb_path_for_serial(rows: list[UsbRow], serial: str) -> str:
+    if serial:
+        for row in rows:
+            s, _ = usb_strings(row.bus, row.dev)
+            if s == serial:
+                return row.usb_path
+    return rows[0].usb_path if len(rows) == 1 else ""
+
+
+def rtl_from_usb(rows: list[UsbRow]) -> list[DeviceInfo]:
+    devices: list[DeviceInfo] = []
+    for row in rows:
+        if (row.vid, row.pid) not in RTL_USB_IDS:
+            continue
+        index = len(devices)
+        info = DeviceInfo(index=index, name=row.desc or "RTL-SDR", serial="",
+                          args=f"rtl={index}", usb_path=row.usb_path, kind="rtl")
+        info.serial, product = usb_strings(row.bus, row.dev)
         if product:
             info.name = product
         devices.append(info)
-        index += 1
     return devices
+
+
+def sdrplay_from_usb(rows: list[UsbRow]) -> list[DeviceInfo]:
+    devices: list[DeviceInfo] = []
+    for row in _sdrplay_usb_rows(rows):
+        index = len(devices)
+        serial, product = usb_strings(row.bus, row.dev)
+        table = SDRPLAY_NAMES.get(row.pid, "SDRplay")
+        if product and "sdrplay" in product.lower():
+            name = product
+        elif product:
+            name = product if product.lower().startswith("rsp") else table
+        else:
+            name = table if table != "SDRplay" else (row.desc or "SDRplay")
+        args = sdrplay_osmosdr_args(serial, 0 if serial else index)
+        devices.append(DeviceInfo(index=index, name=name, serial=serial,
+                                  args=args, usb_path=row.usb_path, kind="sdrplay"))
+    return devices
+
+
+def sdrplay_from_soapy(soapy: list[dict], rows: list[UsbRow]) -> list[DeviceInfo]:
+    usb = _sdrplay_usb_rows(rows)
+    devices: list[DeviceInfo] = []
+    for i, kw in enumerate(soapy):
+        serial = str(kw.get("serial") or "").strip()
+        label = str(kw.get("label") or kw.get("device") or "").strip()
+        name = label or "SDRplay"
+        args = sdrplay_osmosdr_args(serial, 0 if serial else i)
+        devices.append(DeviceInfo(index=i, name=name, serial=serial, args=args,
+                                  usb_path=_usb_path_for_serial(usb, serial),
+                                  kind="sdrplay"))
+    return devices
+
+
+def enumerate_devices(lsusb_text: str | None = None,
+                      soapy: list[dict] | None = None) -> list[DeviceInfo]:
+    """RTL-SDR by USB id, then SDRplay via SoapySDR (USB 1df7 as fallback).
+
+    RTL stays first so an empty `device` setting keeps picking the dongle when
+    both radios are plugged in. `rtl=N` is the Nth RTL device, not the Nth
+    radio overall. SDRplay opens through gr-osmosdr's Soapy backend.
+    """
+    text = read_lsusb() if lsusb_text is None else lsusb_text
+    rows = parse_lsusb(text)
+    rtl = rtl_from_usb(rows)
+    if soapy is None:
+        soapy = soapy_sdrplay_kwargs()
+    sdrplay = sdrplay_from_soapy(soapy, rows) if soapy else []
+    if not sdrplay:
+        sdrplay = sdrplay_from_usb(rows)
+    devices = rtl + sdrplay
+    for i, d in enumerate(devices):
+        d.index = i
+    return devices
+
+
+def looks_like_device_args(value: str) -> bool:
+    return "=" in value
+
+
+def kind_from_args(args: str) -> str:
+    if "sdrplay" in args or args.startswith("soapy"):
+        return "sdrplay"
+    return "rtl"
+
+
+def resolve_device(wanted: str, found: list[DeviceInfo]) -> DeviceInfo | None:
+    """Pick by osmosdr args or serial; a raw args string is kept even if unseen."""
+    for d in found:
+        if not wanted or d.args == wanted or (d.serial and d.serial == wanted):
+            return d
+    if wanted and looks_like_device_args(wanted):
+        return DeviceInfo(index=0, name=wanted, serial="", args=wanted,
+                          kind=kind_from_args(wanted))
+    return None
+
+
+def annotate_holders(devices: list[DeviceInfo],
+                     ours_args: str | None = None) -> list[DeviceInfo]:
+    out: list[DeviceInfo] = []
+    for d in devices:
+        copy = DeviceInfo(**vars(d))
+        if ours_args and copy.args == ours_args:
+            copy.status, copy.held_by = "ours", ""
+        else:
+            holder = holder_of(copy.usb_path)
+            if holder:
+                copy.status, copy.held_by = "busy", holder
+            else:
+                copy.status, copy.held_by = "free", ""
+        out.append(copy)
+    return out
 
 
 def usb_strings(bus: str, dev: str) -> tuple[str, str]:
@@ -634,8 +810,9 @@ class Daemon:
     def device_json(self) -> dict:
         d = self.device
         if d is None:
-            return {"status": "missing", "name": "", "serial": "", "args": "", "held_by": ""}
-        return {"status": d.status, "name": d.name, "serial": d.serial, "args": d.args, "held_by": d.held_by}
+            return {"status": "missing", "name": "", "serial": "", "args": "", "held_by": "", "kind": ""}
+        return {"status": d.status, "name": d.name, "serial": d.serial, "args": d.args,
+                "held_by": d.held_by, "kind": d.kind}
 
     def hello(self) -> dict:
         return {"v": PROTOCOL_VERSION, "type": "hello", "version": VERSION, "demods": DEMODS,
@@ -645,23 +822,12 @@ class Daemon:
     def refresh_device(self):
         found = enumerate_devices()
         wanted = self.settings.get("device") or ""
-        chosen = None
-        for d in found:
-            if not wanted or d.args == wanted or (d.serial and d.serial == wanted):
-                chosen = d
-                break
+        chosen = resolve_device(wanted, found)
         if chosen is None:
             self.device = None
             return
-        if self.receiver.running:
-            chosen.status = "ours"
-        else:
-            holder = holder_of(chosen.usb_path)
-            if holder:
-                chosen.status, chosen.held_by = "busy", holder
-            else:
-                chosen.status = "free"
-        self.device = chosen
+        ours = chosen.args if self.receiver.running else None
+        self.device = annotate_holders([chosen], ours)[0]
 
     # -- commands ------------------------------------------------------------
     def handle(self, msg: dict, sender: socket.socket | None = None) -> dict | None:
@@ -755,8 +921,9 @@ class Daemon:
             if t == "search_nearby":
                 return self.search_nearby(msg, sender)
             if t == "list_devices":
+                ours = self.device.args if self.receiver.running and self.device else None
                 return {"v": PROTOCOL_VERSION, "type": "devices",
-                        "devices": [vars(d) for d in enumerate_devices()]}
+                        "devices": [vars(d) for d in annotate_holders(enumerate_devices(), ours)]}
             if t == "save_preset":
                 return self.save_preset(msg)
             if t == "delete_preset":
@@ -782,7 +949,7 @@ class Daemon:
     def play(self) -> dict:
         self.refresh_device()
         if self.device is None:
-            self.receiver.error = "No RTL-SDR device found"
+            self.receiver.error = "No SDR device found"
             return self.broadcast_state()
         if self.device.status == "busy":
             self.receiver.error = "Device held by " + self.device.held_by
@@ -1046,7 +1213,7 @@ def main(argv=None) -> int:
     sub.add_parser("ensure", help="start the daemon in the background if it is not running")
     sub.add_parser("stop", help="ask a running daemon to exit")
     sub.add_parser("status", help="print whether the daemon is running")
-    sub.add_parser("devices", help="list RTL-SDR devices and who holds them")
+    sub.add_parser("devices", help="list SDR devices and who holds them")
     args = parser.parse_args(argv)
     cmd = args.cmd or "run"
 
@@ -1055,9 +1222,9 @@ def main(argv=None) -> int:
         print(f"running (pid {pid})" if pid else "not running")
         return 0 if pid else 1
     if cmd == "devices":
-        for d in enumerate_devices():
-            holder = holder_of(d.usb_path)
-            print(f"{d.args}\t{d.name}\tSN {d.serial or '?'}\t{'held by ' + holder if holder else 'free'}")
+        for d in annotate_holders(enumerate_devices()):
+            print(f"{d.args}\t{d.kind}\t{d.name}\tSN {d.serial or '?'}\t"
+                  f"{'held by ' + d.held_by if d.held_by else 'free'}")
         return 0
     if cmd == "stop":
         pid = running_pid()

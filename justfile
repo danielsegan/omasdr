@@ -47,7 +47,7 @@ status:
 stop:
     @{{py}} daemon/omasdrd.py stop
 
-# List RTL-SDR devices and say who is holding them.
+# List SDR devices and say who is holding them.
 [group('daemon')]
 devices:
     @{{py}} daemon/omasdrd.py devices
