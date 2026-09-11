@@ -342,7 +342,11 @@ def annotate_holders(devices: list[DeviceInfo],
 def usb_strings(bus: str, dev: str) -> tuple[str, str]:
     """Serial and product from sysfs, without touching the device."""
     base = Path("/sys/bus/usb/devices")
-    for entry in base.iterdir():
+    try:
+        entries = list(base.iterdir())
+    except OSError:
+        return "", ""
+    for entry in entries:
         try:
             if (entry / "busnum").read_text().strip() != str(int(bus)):
                 continue
