@@ -39,7 +39,9 @@ FocusScope {
         switch (deviceStatus) {
         case "ours": return "LIVE";
         case "busy": return "HELD BY " + state.device.held_by.toUpperCase();
-        case "missing": return "NO DEVICE";
+        case "missing":
+            return state.device && state.device.kind === "sdrconnect"
+                ? "SDRCONNECT NOT RUNNING" : "NO DEVICE";
         default: return "READY";
         }
     }
@@ -308,6 +310,7 @@ FocusScope {
                 text: card.pendingPlay ? "…" : card.playing ? "■ STOP" : "▶ PLAY"
                 selected: card.playing
                 enabled: !card.state || card.deviceStatus !== "missing"
+                    || (card.state.device && card.state.device.kind === "sdrconnect")
                 onClicked: card.togglePlay()
             }
         }

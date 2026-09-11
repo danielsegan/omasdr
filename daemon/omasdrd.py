@@ -34,6 +34,11 @@ try:
 except Exception:                                       # noqa: BLE001
     nearby = None
 
+try:
+    import sdrconnect
+except Exception:                                       # noqa: BLE001
+    sdrconnect = None
+
 PROTOCOL_VERSION = 1
 PLUGIN_ID = "com.omasdr.radio"
 
@@ -109,11 +114,15 @@ DEFAULT_SETTINGS = {
     "squelch": -150.0,       # dB; effectively open
     "volume": 0.5,
     "keep_running": False,
-    "device": "",            # osmosdr device string; "" means first found
+    "device": "",            # osmosdr / sdrconnect device string; "" means first found
     "step_override": 0,      # 0 means follow demod
     "record_dir": str(Path.home() / "Audio" / "OmaSDR"),
     # Where the user is, for the nearby search. Asked once, never guessed.
     "location": {},          # {"name", "latitude", "longitude", "source"}
+    # SDRConnect WebSocket (option A). Used when enumerating the virtual
+    # device and when `device` is just "sdrconnect" with no host.
+    "sdrconnect_host": "127.0.0.1",
+    "sdrconnect_port": 5454,
 }
 
 
@@ -155,7 +164,7 @@ class DeviceInfo:
     usb_path: str = ""   # /dev/bus/usb/BBB/DDD
     status: str = "free"  # free | ours | busy | missing
     held_by: str = ""     # process name when busy
-    kind: str = "rtl"    # rtl | sdrplay; additive, older clients ignore it
+    kind: str = "rtl"    # rtl | sdrplay | sdrconnect; additive, older clients ignore it
 
 
 @dataclass(frozen=True)
@@ -279,13 +288,40 @@ def sdrplay_from_soapy(soapy: list[dict], rows: list[UsbRow]) -> list[DeviceInfo
     return devices
 
 
+def sdrconnect_from_settings(host: str = "", port: int = 0,
+                             reachable: bool | None = None) -> DeviceInfo | None:
+    """One virtual device for the SDRConnect WebSocket. Always listed.
+
+    Reachable is a TCP probe of the configured port. The radio itself sits
+    behind SDRConnect, so there is no USB node for fuser to watch.
+    """
+    if sdrconnect is None:
+        return None
+    try:
+        ep = sdrconnect.parse_device_args(
+            "sdrconnect", default_host=host or sdrconnect.DEFAULT_HOST,
+            default_port=int(port or sdrconnect.DEFAULT_PORT))
+    except ValueError:
+        return None
+    if reachable is None:
+        reachable = sdrconnect.probe_cached(ep.host, ep.port)
+    return DeviceInfo(index=0, name=ep.label, serial="", args=ep.args,
+                      usb_path="", status="free" if reachable else "missing",
+                      kind="sdrconnect")
+
+
 def enumerate_devices(lsusb_text: str | None = None,
-                      soapy: list[dict] | None = None) -> list[DeviceInfo]:
-    """RTL-SDR by USB id, then SDRplay via SoapySDR (USB 1df7 as fallback).
+                      soapy: list[dict] | None = None,
+                      sdrconnect_host: str = "",
+                      sdrconnect_port: int = 0,
+                      sdrconnect_reachable: bool | None = None) -> list[DeviceInfo]:
+    """RTL-SDR by USB id, then SDRplay via SoapySDR, then SDRConnect.
 
     RTL stays first so an empty `device` setting keeps picking the dongle when
     both radios are plugged in. `rtl=N` is the Nth RTL device, not the Nth
     radio overall. SDRplay opens through gr-osmosdr's Soapy backend.
+    SDRConnect is a parallel WebSocket backend, listed last, and is how a
+    radio already owned by SDRConnect is used.
     """
     text = read_lsusb() if lsusb_text is None else lsusb_text
     rows = parse_lsusb(text)
@@ -296,16 +332,22 @@ def enumerate_devices(lsusb_text: str | None = None,
     if not sdrplay:
         sdrplay = sdrplay_from_usb(rows)
     devices = rtl + sdrplay
+    extra = sdrconnect_from_settings(sdrconnect_host, sdrconnect_port,
+                                     sdrconnect_reachable)
+    if extra is not None:
+        devices.append(extra)
     for i, d in enumerate(devices):
         d.index = i
     return devices
 
 
 def looks_like_device_args(value: str) -> bool:
-    return "=" in value
+    return "=" in value or value == "sdrconnect"
 
 
 def kind_from_args(args: str) -> str:
+    if sdrconnect is not None and sdrconnect.is_sdrconnect_args(args):
+        return "sdrconnect"
     if "sdrplay" in args or args.startswith("soapy"):
         return "sdrplay"
     return "rtl"
@@ -329,6 +371,18 @@ def annotate_holders(devices: list[DeviceInfo],
         copy = DeviceInfo(**vars(d))
         if ours_args and copy.args == ours_args:
             copy.status, copy.held_by = "ours", ""
+        elif copy.kind == "sdrconnect":
+            # SDRConnect holding the USB node is expected; the WebSocket is
+            # the lock we care about. Re-probe so "not running" shows up.
+            if sdrconnect is not None:
+                try:
+                    ep = sdrconnect.parse_device_args(copy.args)
+                    copy.status = "free" if sdrconnect.probe_cached(ep.host, ep.port) else "missing"
+                except ValueError:
+                    copy.status = "missing"
+            else:
+                copy.status = "missing"
+            copy.held_by = ""
         else:
             holder = holder_of(copy.usb_path)
             if holder:
@@ -446,24 +500,35 @@ class Receiver:
         self.fft = FftTap()
         self.rate = 0
         self.bw = 0
+        self._sdrconnect = None
 
     def _import(self):
         global gr, analog, audio, filter_, blocks, osmosdr, logpwrfft
         from gnuradio import gr, analog, audio, blocks
         from gnuradio import filter as filter_
         from gnuradio.fft import logpwrfft
-        import osmosdr  # noqa: F401
 
     def start(self, settings: dict, device_args: str):
         self.stop()
         self.error = ""
         try:
+            # Talk to SDRConnect before importing GNU Radio so "not running"
+            # is the error the user sees, not a missing binding on a machine
+            # that only wanted the WebSocket path.
+            if sdrconnect is not None and sdrconnect.is_sdrconnect_args(device_args):
+                self._connect_sdrconnect(settings, device_args)
             self._import()
             self._build(settings, device_args)
             self.tb.start()
             self.running = True
         except Exception as exc:  # any GNU Radio construction error is user-facing
             self.error = short_error(exc)
+            if self._sdrconnect is not None:
+                try:
+                    self._sdrconnect.stop()
+                except Exception:
+                    pass
+                self._sdrconnect = None
             self.tb = None
             self.src = None
             self.running = False
@@ -497,6 +562,50 @@ class Receiver:
         self.src = None
         self._blocks = []
         self.running = False
+        if self._sdrconnect is not None:
+            try:
+                self._sdrconnect.stop()
+            except Exception:
+                pass
+            self._sdrconnect = None
+
+    def _make_osmosdr_source(self, s: dict, device_args: str):
+        import osmosdr
+        rate = int(s["sample_rate"])
+        src = osmosdr.source(args=f"numchan=1 {device_args}")
+        src.set_sample_rate(rate)
+        self.offset = min(TUNE_OFFSET_HZ, rate // 4)
+        src.set_center_freq(int(s["frequency"]) + self.offset, 0)
+        src.set_freq_corr(int(s["ppm"]), 0)
+        self._apply_gain(src, s["gain"])
+        self.gain_range = gain_steps(src.get_gain_range())
+        return src
+
+    def _connect_sdrconnect(self, s: dict, device_args: str):
+        if sdrconnect is None:
+            raise RuntimeError("SDRConnect backend is unavailable (daemon/sdrconnect.py missing)")
+        host = str(s.get("sdrconnect_host") or sdrconnect.DEFAULT_HOST)
+        port = int(s.get("sdrconnect_port") or sdrconnect.DEFAULT_PORT)
+        ep = sdrconnect.parse_device_args(device_args, default_host=host, default_port=port)
+        rate = int(s["sample_rate"])
+        self.offset = min(TUNE_OFFSET_HZ, rate // 4)
+        client = sdrconnect.SdrconnectClient(ep)
+        client.start(frequency=int(s["frequency"]), sample_rate=rate,
+                     gain=s.get("gain"), offset=self.offset, ppm=int(s.get("ppm") or 0))
+        if client.actual_rate:
+            rate = int(client.actual_rate)
+            self.offset = min(TUNE_OFFSET_HZ, rate // 4)
+        self._sdrconnect = client
+        self.gain_range = []
+        return rate
+
+    def _make_sdrconnect_source(self, s: dict, device_args: str):
+        if self._sdrconnect is None:
+            self._connect_sdrconnect(s, device_args)
+        src = self._sdrconnect.make_source()
+        rate = int(self._sdrconnect.actual_rate or s["sample_rate"])
+        self.offset = min(TUNE_OFFSET_HZ, rate // 4)
+        return src, rate
 
     def _build(self, s: dict, device_args: str):
         demod = next(d for d in DEMODS if d["id"] == s["demod"])
@@ -506,13 +615,11 @@ class Receiver:
         self._audio_rate = audio_rate
 
         tb = gr.top_block("omasdr")
-        src = osmosdr.source(args=f"numchan=1 {device_args}")
-        src.set_sample_rate(rate)
-        self.offset = min(TUNE_OFFSET_HZ, rate // 4)
-        src.set_center_freq(int(s["frequency"]) + self.offset, 0)
-        src.set_freq_corr(int(s["ppm"]), 0)
-        self._apply_gain(src, s["gain"])
-        self.gain_range = gain_steps(src.get_gain_range())
+        if sdrconnect is not None and sdrconnect.is_sdrconnect_args(device_args):
+            src, rate = self._make_sdrconnect_source(s, device_args)
+            s = {**s, "sample_rate": rate}
+        else:
+            src = self._make_osmosdr_source(s, device_args)
 
         # Channel: decimate the wideband stream down to a rate the demod likes.
         if demod["id"] in ("wfm", "wfm_stereo"):
@@ -633,15 +740,21 @@ class Receiver:
 
     # Live changes: no rebuild needed.
     def set_frequency(self, hz: int):
-        if self.src is not None:
+        if self._sdrconnect is not None:
+            self._sdrconnect.set_frequency(int(hz), self.offset)
+        elif self.src is not None:
             self.src.set_center_freq(int(hz) + self.offset, 0)
 
     def set_gain(self, gain):
-        if self.src is not None:
+        if self._sdrconnect is not None:
+            self._sdrconnect.set_gain(gain)
+        elif self.src is not None:
             self._apply_gain(self.src, gain)
 
     def set_ppm(self, ppm: int):
-        if self.src is not None:
+        if self._sdrconnect is not None:
+            self._sdrconnect.set_ppm(int(ppm))
+        elif self.src is not None:
             self.src.set_freq_corr(int(ppm), 0)
 
     def set_volume(self, v: float):
@@ -808,7 +921,9 @@ class Daemon:
             "record_dir": self.settings["record_dir"],
             "device": self.device_json(),
             "location": self.settings.get("location") or {},
-            "error": self.receiver.error,
+            "error": self.receiver.error or (
+                self.receiver._sdrconnect.error if self.receiver._sdrconnect is not None
+                and self.receiver.running else ""),
         }
 
     def device_json(self) -> dict:
@@ -824,7 +939,9 @@ class Daemon:
                 "bandplan": self.bandplan}
 
     def refresh_device(self):
-        found = enumerate_devices()
+        found = enumerate_devices(
+            sdrconnect_host=str(self.settings.get("sdrconnect_host") or ""),
+            sdrconnect_port=int(self.settings.get("sdrconnect_port") or 0))
         wanted = self.settings.get("device") or ""
         chosen = resolve_device(wanted, found)
         if chosen is None:
@@ -917,7 +1034,19 @@ class Daemon:
                 self.settings["keep_running"] = bool(msg.get("enabled", False))
                 return self.persist_and_broadcast()
             if t == "set_device":
-                self.settings["device"] = str(msg.get("device", ""))
+                wanted = str(msg.get("device", ""))
+                self.settings["device"] = wanted
+                if sdrconnect is not None and sdrconnect.is_sdrconnect_args(wanted):
+                    try:
+                        ep = sdrconnect.parse_device_args(
+                            wanted,
+                            default_host=str(self.settings.get("sdrconnect_host") or ""),
+                            default_port=int(self.settings.get("sdrconnect_port") or 0))
+                        self.settings["sdrconnect_host"] = ep.host
+                        self.settings["sdrconnect_port"] = ep.port
+                        self.settings["device"] = ep.args
+                    except ValueError:
+                        pass
                 if self.receiver.running:
                     return self.play()
                 self.refresh_device()
@@ -926,8 +1055,11 @@ class Daemon:
                 return self.search_nearby(msg, sender)
             if t == "list_devices":
                 ours = self.device.args if self.receiver.running and self.device else None
+                found = enumerate_devices(
+                    sdrconnect_host=str(self.settings.get("sdrconnect_host") or ""),
+                    sdrconnect_port=int(self.settings.get("sdrconnect_port") or 0))
                 return {"v": PROTOCOL_VERSION, "type": "devices",
-                        "devices": [vars(d) for d in annotate_holders(enumerate_devices(), ours)]}
+                        "devices": [vars(d) for d in annotate_holders(found, ours)]}
             if t == "save_preset":
                 return self.save_preset(msg)
             if t == "delete_preset":
@@ -955,13 +1087,16 @@ class Daemon:
         if self.device is None:
             self.receiver.error = "No SDR device found"
             return self.broadcast_state()
-        if self.device.status == "busy":
+        if self.device.status == "busy" and self.device.kind != "sdrconnect":
             self.receiver.error = "Device held by " + self.device.held_by
             return self.broadcast_state()
         try:
             self.receiver.start(self.settings, self.device.args)
-        except Exception:
-            log("start failed:", traceback.format_exc())
+        except Exception as exc:
+            if isinstance(exc, ConnectionError):
+                log("start failed:", short_error(exc))
+            else:
+                log("start failed:", traceback.format_exc())
             self.refresh_device()
             return self.broadcast_state()
         self.refresh_device()
@@ -1143,6 +1278,21 @@ class Daemon:
         last = None
         while not self.stopping:
             time.sleep(1.0 / LEVEL_HZ)
+            sc = self.receiver._sdrconnect
+            if self.receiver.running and sc is not None:
+                if sc.error and not sc.connected:
+                    if getattr(self, "_sdrconnect_err", "") != sc.error:
+                        self._sdrconnect_err = sc.error
+                        with self.lock:
+                            self.receiver.error = sc.error
+                            self.sender = None
+                            self.broadcast_state()
+                elif sc.connected and getattr(self, "_sdrconnect_err", ""):
+                    self._sdrconnect_err = ""
+                    with self.lock:
+                        self.receiver.error = ""
+                        self.sender = None
+                        self.broadcast_state()
             if not self.receiver.running or not self.clients:
                 continue
             with self.receiver.fft.lock:
@@ -1226,9 +1376,12 @@ def main(argv=None) -> int:
         print(f"running (pid {pid})" if pid else "not running")
         return 0 if pid else 1
     if cmd == "devices":
-        for d in annotate_holders(enumerate_devices()):
-            print(f"{d.args}\t{d.kind}\t{d.name}\tSN {d.serial or '?'}\t"
-                  f"{'held by ' + d.held_by if d.held_by else 'free'}")
+        saved = load_json(SETTINGS_PATH, {})
+        host = str(saved.get("sdrconnect_host") or "") if isinstance(saved, dict) else ""
+        port = int(saved.get("sdrconnect_port") or 0) if isinstance(saved, dict) else 0
+        for d in annotate_holders(enumerate_devices(sdrconnect_host=host, sdrconnect_port=port)):
+            extra = d.held_by if d.held_by else d.status
+            print(f"{d.args}\t{d.kind}\t{d.name}\tSN {d.serial or '?'}\t{extra}")
         return 0
     if cmd == "stop":
         pid = running_pid()

@@ -69,10 +69,16 @@ scroll-to-step for that demod in hertz.
   spike never sits in the passband. Clients never see the offset.
 - `device.status` is one of `free`, `ours`, `busy`, `missing`. `held_by` is
   the process name when `busy` (for example `gqrx` or `SDRConnect`).
-- `device.kind` is `rtl` or `sdrplay`. Added with SDRplay support; an older
-  client that does not read it keeps working. `args` is the osmosdr string
-  the daemon will open: `rtl=N` for an RTL-SDR, `soapy=0,driver=sdrplay`
-  (plus `,serial=…` when known) for an SDRplay.
+- `device.kind` is `rtl`, `sdrplay`, or `sdrconnect`. Added with each extra
+  backend; an older client that does not read it keeps working. `args` is
+  the string the daemon will open: `rtl=N` for an RTL-SDR,
+  `soapy=0,driver=sdrplay` (plus `,serial=…` when known) for native SDRplay,
+  or `sdrconnect=host:port` for SDRConnect's WebSocket (default
+  `127.0.0.1:5454`).
+- `device.status` `missing` on an `sdrconnect` row means nothing is accepting
+  connections on that host:port (SDRConnect is not running, or the
+  WebSocket server is off). Play is still allowed: it tries the handshake
+  and puts the reason on `error`.
 - `recording` is the WAV path being written, or empty; `recording_started`
   is its Unix start time. Recording stops with playback.
 - `error` is the last receiver failure in one line, or empty. It is cleared
@@ -95,12 +101,15 @@ Reply to `list_devices`.
 ```json
 {"v": 1, "type": "devices", "devices": [
   {"index": 0, "name": "...", "serial": "...", "args": "rtl=0", "usb_path": "/dev/bus/usb/001/002", "status": "free", "held_by": "", "kind": "rtl"},
-  {"index": 1, "name": "SDRplay RSPdx", "serial": "...", "args": "soapy=0,driver=sdrplay,serial=...", "usb_path": "/dev/bus/usb/001/004", "status": "free", "held_by": "", "kind": "sdrplay"}
+  {"index": 1, "name": "SDRplay RSPdx", "serial": "...", "args": "soapy=0,driver=sdrplay,serial=...", "usb_path": "/dev/bus/usb/001/004", "status": "free", "held_by": "", "kind": "sdrplay"},
+  {"index": 2, "name": "SDRConnect (127.0.0.1:5454)", "serial": "", "args": "sdrconnect=127.0.0.1:5454", "usb_path": "", "status": "missing", "held_by": "", "kind": "sdrconnect"}
 ]}
 ```
 
-RTL-SDR dongles are listed first, then SDRplay radios. `kind` and extra
+RTL-SDR dongles are listed first, then native SDRplay radios, then one
+SDRConnect WebSocket row for the configured host:port. `kind` and extra
 devices are additive: a client that only understood RTL rows still does.
+The SDRConnect row has no `usb_path`: SDRConnect owns the radio.
 
 ### imported
 
@@ -183,7 +192,7 @@ Reply to `quit`, then the daemon exits.
 | `set_keep_running` | `enabled` (bool) | `state` | off: daemon exits after 10 idle minutes |
 | `record` | `enabled` (bool) | `state` or `error` | writes `<record_dir>/<stamp>-<MHz>-<demod>.wav`, stereo 16-bit 48 kHz; needs playback |
 | `set_record_dir` | `record_dir` (path) | `state` | `~` is expanded |
-| `set_device` | `device` (osmosdr args or serial, `""` = first) | `state` | restarts the receiver if playing; a raw Soapy string such as `soapy=0,driver=sdrplay` is accepted even if enumerate has not seen the radio yet |
+| `set_device` | `device` (osmosdr / sdrconnect args or serial, `""` = first) | `state` | restarts the receiver if playing; a raw Soapy string such as `soapy=0,driver=sdrplay`, or `sdrconnect=host:port`, is accepted even if enumerate has not seen the radio yet |
 | `list_devices` | | `devices` | |
 | `save_preset` | `name`, `frequency`, `demod`, `tags` | `presets` | replaces a preset at the same frequency |
 | `delete_preset` | `frequency` | `presets` | |
@@ -239,7 +248,7 @@ written in the file, usually `#AARRGGBB`). Empty when the file is missing.
 
 | Path | Owner | Content |
 |---|---|---|
-| `~/.config/omasdr/settings.json` | daemon | last receiver settings; loaded on start |
+| `~/.config/omasdr/settings.json` | daemon | last receiver settings; loaded on start. `sdrconnect_host` / `sdrconnect_port` (default `127.0.0.1` / `5454`) are the SDRConnect WebSocket endpoint used when enumerating that backend and when `device` is `sdrconnect` with no host. |
 | `~/.config/omasdr/presets.json` | daemon | the preset list |
 | `~/.config/omasdr/ui.json` | plugin | UI preferences the daemon never reads (`unit`) |
 | `$XDG_RUNTIME_DIR/omasdr/control.sock` | daemon | the control socket (`OMASDR_RUNTIME_DIR` overrides the directory, for checks) |

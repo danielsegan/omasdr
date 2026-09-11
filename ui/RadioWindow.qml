@@ -36,7 +36,10 @@ Item {
         // arrow keys.
         onVisibleChanged: {
             if (!visible && app.opened) app.dismiss();
-            else if (visible) tuner.forceActiveFocus();
+            else if (visible) {
+                tuner.forceActiveFocus();
+                if (app.engine.connected) app.engine.send({type: "list_devices"});
+            }
         }
         implicitWidth: Number(Quickshell.env("OMASDR_WIDTH")) || 1100
         implicitHeight: Number(Quickshell.env("OMASDR_HEIGHT")) || 720
@@ -173,11 +176,67 @@ Item {
                                 implicitHeight: 26
                                 font.family: app.theme.font
                                 font.pixelSize: app.theme.baseSize
-                                model: ["1024000", "1800000", "2048000", "2400000", "2560000"]
+                                model: app.state && app.state.device && app.state.device.kind === "sdrconnect"
+                                    ? ["2000000", "2048000", "2400000", "3000000", "5000000", "6000000", "8000000", "10000000"]
+                                    : ["1024000", "1800000", "2048000", "2400000", "2560000"]
                                 currentIndex: app.state ? Math.max(0, model.indexOf(String(app.state.sample_rate))) : 3
                                 onActivated: index => app.engine.send({type: "set_sample_rate", sample_rate: Number(model[index])})
                             }
                             Hint { text: "S/s · restarts" }
+                        }
+
+                        Label { text: "Device" }
+                        ComboBox {
+                            id: deviceBox
+                            Layout.fillWidth: true
+                            implicitHeight: 26
+                            font.family: app.theme.font
+                            font.pixelSize: app.theme.baseSize
+                            model: {
+                                var rows = app.engine.devices || [];
+                                if (!rows.length && app.state && app.state.device)
+                                    return [app.state.device.name || app.state.device.args || "—"];
+                                return rows.map(function (d) {
+                                    var mark = d.kind === "sdrconnect" ? "WS"
+                                        : d.kind === "sdrplay" ? "Soapy" : "RTL";
+                                    var extra = (d.kind === "sdrconnect" && d.status === "missing") ? " · offline" : "";
+                                    return (d.name || d.args) + " · " + mark + extra;
+                                });
+                            }
+                            currentIndex: {
+                                var rows = app.engine.devices || [];
+                                var args = app.state && app.state.device ? app.state.device.args : "";
+                                for (var i = 0; i < rows.length; i++)
+                                    if (rows[i].args === args) return i;
+                                return 0;
+                            }
+                            onActivated: index => {
+                                var rows = app.engine.devices || [];
+                                if (rows[index]) app.engine.send({type: "set_device", device: rows[index].args});
+                            }
+                        }
+
+                        Label { text: "SDRConnect" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Field {
+                                id: scHost
+                                Layout.fillWidth: true
+                                Binding on text {
+                                    when: !scHost.activeFocus
+                                    value: {
+                                        var d = app.state && app.state.device;
+                                        if (d && d.kind === "sdrconnect" && d.args.indexOf("sdrconnect=") === 0)
+                                            return d.args.slice(12).split(",")[0];
+                                        return "127.0.0.1:5454";
+                                    }
+                                }
+                                onEditingFinished: {
+                                    var v = text.trim() || "127.0.0.1:5454";
+                                    app.engine.send({type: "set_device", device: "sdrconnect=" + v});
+                                }
+                            }
+                            Hint { text: "host:port · WebSocket" }
                         }
 
                         Label { text: "Squelch" }

@@ -13,7 +13,7 @@ asking the maintainer. Add new decisions here as they are made, with the date.
 - The app should not need to be "open". A small bar widget opens a popover
   with the essential controls; an "expand" action opens a larger panel for
   the waterfall and spectrum plot.
-- Shipped so far: device detection (RTL-SDR and SDRplay via SoapySDR), frequency entry with a kHz/MHz toggle,
+- Shipped so far: device detection (RTL-SDR, SDRplay via SoapySDR, and SDRplay via SDRConnect's WebSocket), frequency entry with a kHz/MHz toggle,
   scroll-to-step tuning, eight demodulators, presets with a repeatable gqrx
   import, recording, a signal meter, a spectrum plot with waterfall, and a
   frequency reference window, and a nearby search for local airband and
@@ -237,17 +237,31 @@ not a signal-processing one. Say exactly this in the README rather than
 implying wider support than has been tried.
 
 **SDRplay via SoapySDR (2026-09-11).** The first extra backend is SDRplay,
-opened natively through gr-osmosdr's Soapy source — not SDRConnect's
-WebSocket. `enumerate_devices` still lists RTL dongles first (empty
-`device` keeps picking the dongle when both are present), then RSPs on USB
-vendor `1df7` / Soapy `driver=sdrplay`. The osmosdr string is
-`soapy=0,driver=sdrplay` plus `,serial=…` when known, the same form gqrx
-documents. Playback is the existing `osmosdr.source(args=...)` path.
-`device.kind` (`rtl` | `sdrplay`) is additive on `state` and `devices`.
-Required extras live in the AUR (`libsdrplay`, `soapysdrplay3-git`) and
-`sdrplay.service`; `setup.sh` checks them but never installs AUR packages.
-The V4 remains the only radio confirmed by ear; an RSP showing up and
-playing still needs a hardware report before the README calls it tested.
+opened natively through gr-osmosdr's Soapy source. `enumerate_devices`
+still lists RTL dongles first (empty `device` keeps picking the dongle when
+both are present), then RSPs on USB vendor `1df7` / Soapy `driver=sdrplay`.
+The osmosdr string is `soapy=0,driver=sdrplay` plus `,serial=…` when known,
+the same form gqrx documents. Playback is the existing
+`osmosdr.source(args=...)` path. `device.kind` (`rtl` | `sdrplay`) is
+additive on `state` and `devices`. Required extras live in the AUR
+(`libsdrplay`, `soapysdrplay3-git`) and `sdrplay.service`; `setup.sh`
+checks them but never installs AUR packages. The V4 remains the only radio
+confirmed by ear; an RSP showing up and playing still needs a hardware
+report before the README calls it tested.
+
+**SDRplay via SDRConnect WebSocket (2026-09-11).** A parallel backend, not
+a replacement for Soapy. It assumes SDRConnect (GUI or headless) is already
+running with its WebSocket server enabled (Preferences, port 5454). The
+daemon talks JSON for tune/gain/rate and ingests signed 16-bit IQ (binary
+type 2) into a GNU Radio source, so demodulation and the spectrum stay
+OmaSDR's. Device args are `sdrconnect=host:port` (default
+`127.0.0.1:5454`); `device.kind` `sdrconnect` is additive. Enumerate lists
+this row last. SDRConnect holding the USB node is expected and does not
+mark the WebSocket device busy. No new Python packages: the handshake is
+in `daemon/sdrconnect.py`. If IQ never arrives, play fails with a clear
+error rather than falling back to SDRConnect's demodulated audio — that
+would give up the eight demodulators. Spectrum/waterfall need IQ; they
+share the existing FFT tap. Not heard on the maintainer's machine.
 
 **Device setup.** MVP detects the connected radio and shows its name,
 serial, and whether it is free, held by OmaSDR, held by another process
@@ -479,7 +493,8 @@ OmaSDR/
 ├── LICENSE                MIT
 ├── daemon/
 │   ├── omasdrd.py         flowgraph, both sockets, presets, CLI. System python3
-│   └── nearby.py          the nearby search: sources, cache, geocoding
+│   ├── nearby.py          the nearby search: sources, cache, geocoding
+│   └── sdrconnect.py      SDRConnect WebSocket client and IQ source
 ├── docs/
 │   ├── protocol.md        the daemon ↔ UI contract
 │   ├── frequencies.md     the frequency reference the help window renders
@@ -622,6 +637,11 @@ Open checks:
       are in (`soapy=0,driver=sdrplay`, USB `1df7`, AUR extras checked by
       setup). Confirm an RSP lists, opens without SDRConnect, and produces
       audio before the README calls it tested.
+- [ ] **SDRplay via SDRConnect WebSocket, on real hardware.** The client,
+      IQ source, device row, and play path are in
+      (`sdrconnect=127.0.0.1:5454`). Confirm SDRConnect with the WebSocket
+      server enabled lists, tunes, plays through OmaSDR's demodulators, and
+      paints a spectrum before the README calls it tested.
 
 ## Distribution
 

@@ -23,7 +23,7 @@ cleanup() {
   exit $status
 }
 trap cleanup EXIT
-/usr/bin/python3 -m py_compile daemon/omasdrd.py daemon/nearby.py
+/usr/bin/python3 -m py_compile daemon/omasdrd.py daemon/nearby.py daemon/sdrconnect.py
 
 # Nearby search: the parts that need no network. The live search only runs
 # with OMASDR_CHECK_NET=1, because this suite has to work anywhere.
@@ -50,11 +50,12 @@ check("FM" in nearby._tokens("YSF/FM") and "FM" not in nearby._tokens("C4FM"), "
 check(nearby._repair("V\u00c3\u00a4stra") == "V\u00e4stra", "double-encoded city names repaired")
 NEARBY
 
-# Device listing: RTL path unchanged, SDRplay via Soapy args, no hardware needed.
+# Device listing: RTL path unchanged, SDRplay via Soapy args, SDRConnect last.
 /usr/bin/python3 - <<'DEVICES'
 import sys
 sys.path.insert(0, "daemon")
 import omasdrd
+import sdrconnect
 
 def check(cond, what):
     print(("  ok   " if cond else "  FAIL ") + what)
@@ -65,38 +66,105 @@ lsusb = (
     "Bus 001 Device 004: ID 1df7:3030 SDRplay RSPdx\n"
     "Bus 001 Device 005: ID 1d6b:0002 Linux Foundation 2.0 root hub\n"
 )
-devs = omasdrd.enumerate_devices(lsusb_text=lsusb, soapy=[])
-check(len(devs) == 2, "lsusb lists RTL and SDRplay, ignores hubs")
+devs = omasdrd.enumerate_devices(lsusb_text=lsusb, soapy=[], sdrconnect_reachable=False)
+check(len(devs) == 3, "lsusb lists RTL and SDRplay, plus the SDRConnect row")
 check(devs[0].kind == "rtl" and devs[0].args == "rtl=0", "RTL stays first with rtl=0")
 check(devs[1].kind == "sdrplay" and devs[1].args.startswith("soapy=") and "driver=sdrplay" in devs[1].args,
       "SDRplay USB fallback uses soapy=,driver=sdrplay")
 check(devs[1].name.startswith("SDRplay"), "SDRplay USB id maps to a model name")
+check(devs[2].kind == "sdrconnect" and devs[2].args == "sdrconnect=127.0.0.1:5454",
+      "SDRConnect is listed last with the default host:port")
+check(devs[2].status == "missing", "offline SDRConnect is missing, not free")
 
 rtl_only = omasdrd.enumerate_devices(
-    lsusb_text="Bus 001 Device 003: ID 0bda:2838 Realtek RTL2838\n", soapy=[])
-check(len(rtl_only) == 1 and rtl_only[0].args == "rtl=0" and rtl_only[0].kind == "rtl",
-      "RTL-only listing is unchanged")
+    lsusb_text="Bus 001 Device 003: ID 0bda:2838 Realtek RTL2838\n", soapy=[],
+    sdrconnect_reachable=False)
+check(rtl_only[0].args == "rtl=0" and rtl_only[0].kind == "rtl",
+      "RTL-only listing still puts the dongle first")
+check(any(d.kind == "sdrconnect" for d in rtl_only), "SDRConnect remains listed without an RSP")
 
 two_rtl = omasdrd.enumerate_devices(
-    lsusb_text="Bus 001 Device 003: ID 0bda:2838 A\nBus 001 Device 006: ID 0bda:2832 B\n", soapy=[])
-check([d.args for d in two_rtl] == ["rtl=0", "rtl=1"], "second RTL is rtl=1, not mixed with Soapy")
+    lsusb_text="Bus 001 Device 003: ID 0bda:2838 A\nBus 001 Device 006: ID 0bda:2832 B\n",
+    soapy=[], sdrconnect_reachable=False)
+check([d.args for d in two_rtl if d.kind == "rtl"] == ["rtl=0", "rtl=1"],
+      "second RTL is rtl=1, not mixed with Soapy")
 
 soapy = [{"driver": "sdrplay", "label": "SDRplay Dev 0 RSPdx  ABC123", "serial": "ABC123"}]
-devs = omasdrd.enumerate_devices(lsusb_text=lsusb, soapy=soapy)
+devs = omasdrd.enumerate_devices(lsusb_text=lsusb, soapy=soapy, sdrconnect_reachable=False)
 sp = [d for d in devs if d.kind == "sdrplay"]
 check(len(sp) == 1 and sp[0].args == "soapy=0,driver=sdrplay,serial=ABC123",
       "Soapy serial becomes the osmosdr args")
 check("RSPdx" in sp[0].name, "Soapy label becomes the display name")
 
-check(omasdrd.enumerate_devices(lsusb_text="", soapy=[]) == [], "no devices")
+none = omasdrd.enumerate_devices(lsusb_text="", soapy=[], sdrconnect_reachable=False)
+check(len(none) == 1 and none[0].kind == "sdrconnect",
+      "no USB radios still lists the SDRConnect backend")
 check(omasdrd.sdrplay_osmosdr_args() == "soapy=0,driver=sdrplay", "default SDRplay args match gqrx")
 
 d = omasdrd.resolve_device("soapy=0,driver=sdrplay", [])
 check(d is not None and d.kind == "sdrplay" and d.args == "soapy=0,driver=sdrplay",
       "set_device accepts a raw Soapy string")
+d = omasdrd.resolve_device("sdrconnect=192.0.2.8:5454", [])
+check(d is not None and d.kind == "sdrconnect" and d.args == "sdrconnect=192.0.2.8:5454",
+      "set_device accepts a raw SDRConnect string")
 check(omasdrd.resolve_device("missing-serial", []) is None,
       "unknown serial is missing, not synthesized")
 check(omasdrd.resolve_device("", rtl_only) is rtl_only[0], "empty device picks the first radio")
+
+ep = sdrconnect.parse_device_args("sdrconnect")
+check(ep.host == "127.0.0.1" and ep.port == 5454 and ep.args == "sdrconnect=127.0.0.1:5454",
+      "bare sdrconnect expands to the default endpoint")
+ep = sdrconnect.parse_device_args("sdrconnect=10.0.0.5:6000,device=secondary")
+check(ep.host == "10.0.0.5" and ep.port == 6000 and ep.device == "secondary",
+      "host, port, and secondary tuner parse")
+check(sdrconnect.parse_device_args("sdrconnect=:5455").port == 5455, "port-only form keeps the default host")
+check(not sdrconnect.probe("127.0.0.1", 1), "probe of a closed port is false")
+
+import struct
+tone = sdrconnect.unpack_iq(struct.pack("<hh", 16384, -16384))
+check(abs(tone[0].real - 0.5) < 1e-3 and abs(tone[0].imag + 0.5) < 1e-3, "int16 IQ unpacks to ±0.5")
+kind, payload = sdrconnect.split_binary_frame(struct.pack("<H", 2) + struct.pack("<hh", 1, 2))
+check(kind == 2 and len(payload) == 4, "binary frames start with a 2-byte type")
+
+fake = sdrconnect.FakeSdrconnect().start()
+try:
+    check(sdrconnect.probe(fake.host, fake.port), "fake SDRConnect accepts a TCP probe")
+    client = sdrconnect.SdrconnectClient(sdrconnect.Endpoint(fake.host, fake.port))
+    client.start(frequency=101_100_000, sample_rate=2_400_000, gain=20, offset=300_000)
+    check(client.iq_seen and client.connected, "client receives IQ from the fake server")
+    check(len(client.ring) > 0, "IQ samples land in the ring")
+    client.set_frequency(104_100_000, offset=300_000)
+    # Give the reader a tick to process the set_property.
+    import time; time.sleep(0.2)
+    freqs = [e for e in fake.events if e.get("event_type") == "set_property"
+             and e.get("property") == "device_center_frequency"]
+    check(freqs and freqs[-1]["value"] == "104400000",
+          "retune sends device_center_frequency = freq + offset")
+    vfos = [e for e in fake.events if e.get("property") == "device_vfo_frequency"]
+    check(vfos and vfos[-1]["value"] == "104100000", "VFO is the wanted channel")
+    client.stop()
+    check(not client.connected, "stop closes the WebSocket")
+finally:
+    fake.stop()
+
+silent = sdrconnect.FakeSdrconnect(send_iq=False).start()
+try:
+    quiet = sdrconnect.SdrconnectClient(sdrconnect.Endpoint(silent.host, silent.port))
+    try:
+        quiet.start(frequency=100_000_000, sample_rate=2_400_000, gain=0)
+        raise SystemExit("  FAIL start without IQ should raise")
+    except ConnectionError as exc:
+        check("no IQ" in str(exc), "connected-but-silent server is reported as no IQ")
+finally:
+    silent.stop()
+
+down = sdrconnect.SdrconnectClient(sdrconnect.Endpoint("127.0.0.1", 1))
+try:
+    down.start(frequency=100_000_000, sample_rate=2_400_000, gain=0)
+    raise SystemExit("  FAIL start against a closed port should raise")
+except ConnectionError as exc:
+    check("not running" in str(exc).lower() and "127.0.0.1:1" in str(exc),
+          "offline start names the host:port (%s)" % exc)
 DEVICES
 
 /usr/bin/python3 daemon/omasdrd.py ensure
@@ -137,6 +205,15 @@ send({"type": "get_state"}); prior = until("state")
 send({"type": "set_device", "device": "soapy=0,driver=sdrplay"}); r = until("state")
 check(r["device"]["args"] == "soapy=0,driver=sdrplay" and r["device"]["kind"] == "sdrplay",
       "set_device keeps a raw Soapy string")
+send({"type": "set_device", "device": "sdrconnect=127.0.0.1:5454"}); r = until("state")
+check(r["device"]["args"] == "sdrconnect=127.0.0.1:5454" and r["device"]["kind"] == "sdrconnect",
+      "set_device keeps a raw SDRConnect string")
+send({"type": "list_devices"}); r = until("devices")
+check(any(d.get("kind") == "sdrconnect" for d in r["devices"]),
+      "list_devices includes the SDRConnect backend")
+send({"type": "play"}); r = until("state")
+check(not r["playing"] and "SDRConnect" in (r.get("error") or ""),
+      "play without SDRConnect running names the backend (" + (r.get("error") or "") + ")")
 send({"type": "set_device", "device": ""}); r = until("state")
 check(r["device"]["args"] == prior["device"]["args"] and r["device"]["kind"] == prior["device"]["kind"],
       "empty set_device restores the first radio")
