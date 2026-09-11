@@ -171,6 +171,22 @@ elif (( SDRPLAY_PRESENT )); then
   note "SoapySDR Python bindings missing; USB listing still works, playback goes through gr-osmosdr"
 fi
 
+step "SDRConnect (WebSocket, optional)"
+# Parallel to the Soapy path: SDRConnect owns the radio and OmaSDR talks to
+# its WebSocket. Nothing to install; just say whether port 5454 is listening.
+sc_host="${OMASDR_SDRCONNECT_HOST:-127.0.0.1}"
+sc_port="${OMASDR_SDRCONNECT_PORT:-5454}"
+if command -v ss >/dev/null 2>&1 && ss -lnt | grep -q ":${sc_port} "; then
+  ok "something is listening on ${sc_host}:${sc_port} (SDRConnect WebSocket?)"
+elif command -v nc >/dev/null 2>&1 && nc -z -w 1 "$sc_host" "$sc_port" >/dev/null 2>&1; then
+  ok "something is listening on ${sc_host}:${sc_port} (SDRConnect WebSocket?)"
+else
+  note "SDRConnect WebSocket not detected on ${sc_host}:${sc_port}. To use an RSP that SDRConnect already holds: start SDRConnect (GUI or headless), enable the WebSocket server in Preferences, then pick SDRConnect in the OmaSDR window."
+fi
+if (( SDRPLAY_PRESENT )); then
+  note "an SDRplay on USB can be opened two ways: native Soapy (close SDRConnect) or SDRConnect WebSocket (leave SDRConnect running). Do not start both."
+fi
+
 step "Python bindings (system /usr/bin/python3)"
 if /usr/bin/python3 - <<'PY' 2>/dev/null
 from gnuradio import gr, analog, audio, filter, fft, blocks

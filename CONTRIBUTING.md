@@ -10,6 +10,7 @@ setup.
 ```
 manifest.json          Omarchy plugin manifest (id com.omasdr.radio)
 daemon/omasdrd.py      the whole daemon: flowgraph, sockets, presets, CLI
+daemon/sdrconnect.py   SDRConnect WebSocket client and IQ source
 docs/protocol.md       the daemon <-> UI contract
 ui/RadioBar.qml        bar-widget entry: antenna mark and popover host
 ui/Popover.qml         the tuner card, shared by the bar and the window

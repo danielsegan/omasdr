@@ -84,12 +84,23 @@ went.
 **SDRplay (SoapySDR):** RSP1, RSP1A, RSP2, RSPduo, RSPdx, RSP1B, and
 RSPdx-R2 are discovered on USB vendor `1df7` and opened through
 gr-osmosdr's Soapy backend (`soapy=0,driver=sdrplay`). This is native USB
-access, not SDRConnect's WebSocket. Close SDRConnect first — it holds the
-device. You need two AUR packages the setup script will not install for
-you: `libsdrplay` (the proprietary API; enable `sdrplay.service`) and
-`soapysdrplay3-git` (the Soapy module). Detection and the play path are
-in; they have not yet been confirmed on the maintainer's hardware. If you
-try an RSP, please open an issue and say how it went.
+access. Close SDRConnect first — it holds the device. You need two AUR
+packages the setup script will not install for you: `libsdrplay` (the
+proprietary API; enable `sdrplay.service`) and `soapysdrplay3-git` (the
+Soapy module). Detection and the play path are in; they have not yet been
+confirmed on the maintainer's hardware. If you try an RSP, please open an
+issue and say how it went.
+
+**SDRplay (SDRConnect WebSocket):** a parallel backend, for when SDRConnect
+already owns the radio. Start SDRConnect (the GUI or the headless binary),
+enable the WebSocket server in Preferences (port **5454**), and pick
+**SDRConnect (127.0.0.1:5454)** in the expanded window's device list — or
+set `device` to `sdrconnect=127.0.0.1:5454` in
+`~/.config/omasdr/settings.json`. OmaSDR tunes over JSON and feeds IQ into
+the same demodulators and spectrum it uses for an RTL-SDR. You do not need
+the Soapy AUR packages for this path. A remote host works
+(`sdrconnect=192.168.1.10:5454`); 2.4 MS/s IQ is about 10 MB/s, so prefer
+localhost. This path has not been heard on the maintainer's machine.
 
 **Not found yet:** rebadged RTL dongles that report some other USB id, and
 every remaining non-RTL radio. The signal-processing layer underneath is
@@ -206,7 +217,13 @@ choose **WFM stereo**, press **PLAY**.
 - **Gain.** OmaSDR starts at a fixed 25.4 dB. The tuner's own automatic gain
   is in the full window, but it pumps and distorts on strong stations, so a
   fixed value usually sounds better. A dongle at zero gain looks exactly
-  like a dead one: flat noise, no stations.
+  like a dead one: flat noise, no stations. On the SDRConnect backend, gain
+  is best-effort over the WebSocket (`rf_gain` and friends); SDRConnect's
+  own gain controls still apply if a property is ignored.
+- **Which radio.** The expanded window's **Device** list is RTL-SDR first,
+  then native SDRplay, then SDRConnect. Empty `device` keeps the first
+  radio, so a dongle still wins when both are present. The **SDRConnect**
+  field is `host:port` and switches to that backend when you press Enter.
 
 ## Optional: gqrx
 
@@ -247,10 +264,20 @@ before starting gqrx or SDRConnect.
 
 **"No device."** Plug the radio straight into the machine. Some USB-C hubs
 silently fail to pass it through, with nothing in `lsusb` and nothing in
-`dmesg`. Try a different port before anything else. An SDRplay also needs
-`sdrplay.service` running and SDRConnect closed.
+`dmesg`. Try a different port before anything else. Native SDRplay also
+needs `sdrplay.service` running and SDRConnect closed. To use the radio
+through SDRConnect instead, start that program, enable its WebSocket
+server, and select the SDRConnect row in the window.
+
+**"SDRCONNECT NOT RUNNING" / "SDRConnect is not running on …"** Start
+SDRConnect (GUI or headless), open Preferences, and enable the WebSocket
+server on port 5454. Only one program opens the USB radio: leave
+SDRConnect holding it, and do not also start the Soapy path. Then press
+play again.
 
 **"Held by ..."** Another program has the radio. The message names it.
+SDRConnect holding an RSP is expected when you use the WebSocket backend;
+it only blocks the native Soapy path.
 
 **I updated and nothing changed.** Run `omarchy restart shell`. The shell
 caches plugin components, so the bar widget and the windows keep running the
@@ -282,7 +309,7 @@ of every assumption OmaSDR makes.
 
 | File | What |
 |---|---|
-| `~/.config/omasdr/settings.json` | frequency, demod, gain, ppm, sample rate, squelch, volume, recordings folder |
+| `~/.config/omasdr/settings.json` | frequency, demod, gain, ppm, sample rate, squelch, volume, recordings folder, selected device, SDRConnect host/port |
 | `~/.config/omasdr/presets.json` | your presets |
 | `~/.config/omasdr/ui.json` | the kHz/MHz choice |
 | `~/Audio/OmaSDR/` | recordings, unless you moved the folder |

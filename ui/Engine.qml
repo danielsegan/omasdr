@@ -10,6 +10,8 @@ QtObject {
     property var state: null
     property var demods: []
     property var presets: []
+    /// Last `list_devices` reply. Empty until a surface asks.
+    property var devices: []
     property string daemonVersion: ""
     /// gqrx bandplan rows from hello: {start, stop, mode, step, color, name}.
     property var bandplan: []
@@ -61,7 +63,8 @@ QtObject {
                 state = message;
                 error = "";
                 if (!message.playing) level = -150;
-            } else if (message.type === "presets") presets = message.presets;
+            }             else if (message.type === "presets") presets = message.presets;
+            else if (message.type === "devices") devices = message.devices || [];
             else if (message.type === "level") level = message.db;
             else if (message.type === "nearby") {
                 nearbyStatus = message.status;
